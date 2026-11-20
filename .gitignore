@@ -1,0 +1,7 @@
+.DS_Store
+BVS.app/
+backups/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+.build/
