@@ -154,6 +154,13 @@ private enum DestinationMode: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
+private enum SelectionMode: String, CaseIterable, Identifiable {
+    case vlc
+    case numbers
+
+    var id: String { rawValue }
+}
+
 private enum VideoConverter {
     private enum ConversionError: LocalizedError {
         case incompatible
@@ -497,6 +504,74 @@ private struct VLCCompanionView: View {
     }
 }
 
+private struct SettingsView: View {
+    @ObservedObject var store: CategoryStore
+    @Binding var destinationMode: DestinationMode
+    @Binding var customDestinationURL: URL?
+    let onChooseDestination: () -> Void
+    let onRemoveCategory: (String) -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var showCategories = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Text("Configuración").font(.title2.weight(.semibold))
+            Text("Administra las categorías y el lugar donde BVS guardará los videos.")
+                .font(.subheadline).foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Label("Categorías", systemImage: "folder.badge.gearshape").font(.headline)
+                    Spacer()
+                    Button("Gestionar…") { showCategories = true }.buttonStyle(.bordered)
+                }
+                Text(store.categories.isEmpty
+                     ? "Todavía no hay categorías. Puedes crear categorías temporales o permanentes."
+                     : store.categories.joined(separator: " · "))
+                    .font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                Text("Las categorías temporales se olvidan al cerrar BVS; los archivos ya guardados permanecen.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            .padding(14)
+            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
+            Divider()
+            VStack(alignment: .leading, spacing: 10) {
+                Label("Carpeta de salida", systemImage: "externaldrive")
+                    .font(.headline)
+                Picker("Ubicación de Seleccionados", selection: $destinationMode) {
+                    Text("Dentro de la carpeta de trabajo").tag(DestinationMode.workFolder)
+                    Text("En otra ubicación…").tag(DestinationMode.otherFolder)
+                }
+                .pickerStyle(.menu)
+                .onChange(of: destinationMode) { mode in
+                    if mode == .otherFolder, customDestinationURL == nil { onChooseDestination() }
+                }
+                if destinationMode == .otherFolder {
+                    HStack {
+                        Text(customDestinationURL?.path ?? "Elige una carpeta")
+                            .font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                        Spacer()
+                        Button("Elegir…", action: onChooseDestination).buttonStyle(.bordered)
+                    }
+                } else {
+                    Text("Seleccionados se creará dentro de la carpeta de trabajo (o junto a los videos añadidos desde VLC).")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            HStack {
+                Spacer()
+                Button("Listo") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                    .buttonStyle(.borderedProminent)
+            }
+        }
+        .padding(22)
+        .frame(width: 620, height: 640)
+        .sheet(isPresented: $showCategories) {
+            CategoryManagerView(store: store, onRemove: onRemoveCategory)
+        }
+    }
+}
+
 struct ContentView: View {
     @StateObject private var shortcutController = VLCShortcutController.shared
     @StateObject private var categoryStore = CategoryStore.shared
@@ -511,9 +586,10 @@ struct ContentView: View {
     @State private var copyProgress = 0
     @State private var convertVideos = false
     @State private var companionWindow: NSPanel?
-    @State private var showCategoryManager = false
     @State private var destinationMode: DestinationMode = .workFolder
     @State private var customDestinationURL: URL?
+    @State private var selectionMode: SelectionMode = .vlc
+    @State private var showSettings = false
 
     private var outputParentURL: URL? {
         destinationMode == .workFolder ? folderURL : customDestinationURL
@@ -531,11 +607,14 @@ struct ContentView: View {
             header
             ScrollView {
                 VStack(alignment: .leading, spacing: 22) {
-                    folderSection
-                    categorySection
-                    numberSection
+                    selectionModePicker
+                    if selectionMode == .vlc {
+                        vlcPrimarySection
+                    } else {
+                        folderSection
+                        numberSection
+                    }
                     resultsSection
-                    destinationSection
                 }
                 .padding(28)
             }
@@ -551,12 +630,31 @@ struct ContentView: View {
             Text(alertText ?? "")
         }
         .onAppear {
+            if let savedMode = UserDefaults.standard.string(forKey: "BVS.destinationMode"),
+               let mode = DestinationMode(rawValue: savedMode) {
+                destinationMode = mode
+            }
+            if let savedPath = UserDefaults.standard.string(forKey: "BVS.customDestinationPath"), !savedPath.isEmpty {
+                customDestinationURL = URL(fileURLWithPath: savedPath, isDirectory: true)
+            }
             shortcutController.start(onSelect: addVLCVideo) { error in
                 message = error
             }
         }
-        .sheet(isPresented: $showCategoryManager) {
-            CategoryManagerView(store: categoryStore, onRemove: categoryRemoved)
+        .onChange(of: destinationMode) { mode in
+            UserDefaults.standard.set(mode.rawValue, forKey: "BVS.destinationMode")
+        }
+        .onChange(of: customDestinationURL) { url in
+            UserDefaults.standard.set(url?.path ?? "", forKey: "BVS.customDestinationPath")
+        }
+        .sheet(isPresented: $showSettings) {
+            SettingsView(
+                store: categoryStore,
+                destinationMode: $destinationMode,
+                customDestinationURL: $customDestinationURL,
+                onChooseDestination: chooseDestinationFolder,
+                onRemoveCategory: categoryRemoved
+            )
         }
     }
 
@@ -572,21 +670,71 @@ struct ContentView: View {
                 Text("Basic Video Selector").font(.subheadline).foregroundStyle(.secondary)
             }
             Spacer()
-            Text("SELECCIÓN POR TERMINACIÓN")
-                .font(.caption2.weight(.semibold)).tracking(1.1)
-                .foregroundStyle(.tertiary)
             Text(shortcutController.registrationError != nil ? "Atajo no disponible" : (shortcutController.isRegisteredForVLC ? "Atajo listo" : "⌃⌥⌘S"))
                 .font(.caption.monospaced().weight(.semibold))
                 .padding(.horizontal, 8).padding(.vertical, 5)
                 .background(Color(nsColor: .controlBackgroundColor), in: Capsule())
                 .help(shortcutController.registrationError ?? "Atajo activo solo mientras VLC está en primer plano.")
-            Button(action: openVLCCompanion) {
-                Label("Ventana VLC", systemImage: "pip")
-            }
-            .buttonStyle(.bordered)
+            Button { showSettings = true } label: { Image(systemName: "gearshape") }
+                .buttonStyle(.bordered)
+                .help("Configuración")
         }
         .padding(.horizontal, 28).padding(.vertical, 20)
         .background(.bar)
+    }
+
+    private var selectionModePicker: some View {
+        Picker("Método de selección", selection: $selectionMode) {
+            Text("VLC · recomendado").tag(SelectionMode.vlc)
+            Text("Cifras finales").tag(SelectionMode.numbers)
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+    }
+
+    private var vlcPrimarySection: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .top, spacing: 14) {
+                Image(systemName: "play.rectangle.on.rectangle.fill")
+                    .font(.system(size: 28)).foregroundStyle(.tint)
+                    .frame(width: 48, height: 48)
+                    .background(Color.accentColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 13))
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("Selecciona mientras miras").font(.title3.weight(.semibold))
+                    Text("Abre la ventana pequeña junto a VLC y guarda cada video con un clic o con ⌃⌥⌘S.")
+                        .font(.subheadline).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            HStack {
+                Label("Categoría para los próximos videos", systemImage: "folder")
+                    .font(.subheadline).foregroundStyle(.secondary)
+                Spacer()
+                categoryPicker
+                Button(action: openVLCCompanion) {
+                    Label("Abrir ventana VLC", systemImage: "pip")
+                }
+                .buttonStyle(.borderedProminent)
+            }
+            Text(categoryStore.categories.isEmpty
+                 ? "Puedes crear categorías desde Configuración. Sin categoría, los videos se guardan directamente en Seleccionados."
+                 : "La categoría elegida se asigna a cada video que guardes desde VLC; puedes cambiarla cuando quieras.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+        .padding(18)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 14))
+        .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(.quaternary))
+    }
+
+    private var categoryPicker: some View {
+        Picker("Categoría", selection: $categoryStore.selectedCategory) {
+            Text("Sin categoría").tag(Optional<String>.none)
+            ForEach(categoryStore.categories, id: \.self) { category in
+                Text(category).tag(Optional(category))
+            }
+        }
+        .labelsHidden()
+        .pickerStyle(.menu)
+        .frame(maxWidth: 190)
     }
 
     private var folderSection: some View {
@@ -611,60 +759,14 @@ struct ContentView: View {
         }
     }
 
-    private var categorySection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 12) {
-                Label("Categoría para próximos videos", systemImage: "folder.badge.gearshape")
-                    .font(.headline)
-                Spacer()
-                Picker("Categoría", selection: $categoryStore.selectedCategory) {
-                    Text("Sin categoría").tag(Optional<String>.none)
-                    ForEach(categoryStore.categories, id: \.self) { category in
-                        Text(category).tag(Optional(category))
-                    }
-                }
-                .labelsHidden()
-                .pickerStyle(.menu)
-                Button("Gestionar categorías…") { showCategoryManager = true }
-                    .buttonStyle(.bordered)
-            }
-            Text("La categoría se guarda con cada video que añadas y permanece seleccionada hasta que la cambies.")
-                .font(.caption).foregroundStyle(.secondary)
-        }
-    }
-
-    private var destinationSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            sectionTitle("↗", "Destino", detail: "BVS creará la carpeta Seleccionados en la ubicación elegida.")
-            HStack(spacing: 12) {
-                Picker("Ubicación de Seleccionados", selection: $destinationMode) {
-                    Text("Dentro de la carpeta de trabajo").tag(DestinationMode.workFolder)
-                    Text("En otra ubicación…").tag(DestinationMode.otherFolder)
-                }
-                .labelsHidden()
-                .pickerStyle(.menu)
-                .onChange(of: destinationMode) { mode in
-                    if mode == .otherFolder, customDestinationURL == nil {
-                        chooseDestinationFolder()
-                    }
-                }
-                Spacer()
-                if destinationMode == .otherFolder {
-                    Text(customDestinationURL?.path ?? "Elige una carpeta")
-                        .font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                    Button("Elegir…", action: chooseDestinationFolder)
-                        .buttonStyle(.bordered)
-                }
-            }
-            .padding(13)
-            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
-            .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(.quaternary))
-        }
-    }
-
     private var numberSection: some View {
         VStack(alignment: .leading, spacing: 12) {
             sectionTitle("2", "Cifras finales", detail: "Pega números separados por espacios, comas o saltos de línea. Se aceptan longitudes variables.")
+            HStack {
+                Text("Categoría inicial de los resultados").font(.subheadline).foregroundStyle(.secondary)
+                Spacer()
+                categoryPicker
+            }
             TextEditor(text: $input)
                 .font(.system(.body, design: .monospaced))
                 .scrollContentBackground(.hidden)
@@ -720,10 +822,19 @@ struct ContentView: View {
                                         .resizable().frame(width: 26, height: 26)
                                     Text(match.url.lastPathComponent).lineLimit(1)
                                     Spacer()
-                                    Text(match.category ?? "SIN CATEGORÍA")
-                                        .font(.caption2.weight(.medium))
-                                        .foregroundStyle(match.category == nil ? Color.secondary : Color.accentColor)
-                                        .lineLimit(1)
+                                    Menu {
+                                        Button("Sin categoría") { setCategory(for: match, to: nil) }
+                                        ForEach(categoryStore.categories, id: \.self) { category in
+                                            Button(category) { setCategory(for: match, to: category) }
+                                        }
+                                    } label: {
+                                        Label(match.category ?? "Sin categoría", systemImage: "folder")
+                                            .font(.caption2.weight(.medium))
+                                            .foregroundStyle(match.category == nil ? Color.secondary : Color.accentColor)
+                                            .lineLimit(1)
+                                    }
+                                    .menuStyle(.borderlessButton)
+                                    .help("Cambiar categoría de este video")
                                     Text(match.url.pathExtension.isEmpty ? "ARCHIVO" : match.url.pathExtension.uppercased())
                                         .font(.caption2.weight(.medium)).foregroundStyle(.tertiary)
                                     Button {
@@ -833,6 +944,11 @@ struct ContentView: View {
             updated.category = nil
             return updated
         }
+    }
+
+    private func setCategory(for target: Match, to category: String?) {
+        guard let index = matches.firstIndex(where: { $0.id == target.id }) else { return }
+        matches[index].category = category
     }
 
     private func openVLCCompanion() {
