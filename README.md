@@ -15,10 +15,10 @@ Aplicación de escritorio nativa para macOS que encuentra archivos por las cifra
 1. Abre VLC y empieza a reproducir un video local.
 2. En BVS, deja seleccionado **VLC · recomendado** y pulsa **Abrir ventana VLC** para abrir el panel flotante.
 3. La primera vez, macOS puede pedir permiso para que BVS controle VLC. Permítelo en el aviso o en **Ajustes del Sistema > Privacidad y seguridad > Automatización**.
-4. Pulsa **Guardar este video** en el panel o usa **⌃⌥⌘S** mientras VLC está en primer plano. Repite mientras revisas otros clips; los añadidos aparecen en la vista previa de la ventana principal y se pueden quitar con el botón menos.
+4. Pulsa **Guardar este video** en el panel o usa **⌃⌥⌘S** mientras VLC está en primer plano para añadirlo sin categoría. También puedes asignar atajos numéricos a categorías y guardar directamente en ellas con **⌃⌥⌘1** a **⌃⌥⌘0**.
 5. Al terminar, copia o convierte el lote desde la ventana principal.
 
-Si aún no elegiste una carpeta de trabajo, BVS usa la carpeta del primer video añadido desde VLC. Puedes dejar el panel junto a VLC; permanece flotante, abre dentro de la pantalla donde pulsaste **Ventana VLC**, no activa BVS al pulsar **Guardar este video** y actualiza el video actual aproximadamente una vez por segundo. El atajo **⌃⌥⌘S** se registra solo mientras VLC está en primer plano y añade el archivo actual sin abrir ni activar la ventana principal de BVS.
+Si aún no elegiste una carpeta de trabajo, BVS usa la carpeta del primer video añadido desde VLC. Puedes dejar el panel junto a VLC; permanece flotante, abre dentro de la pantalla donde pulsaste **Abrir ventana VLC**, no activa BVS al pulsar **Guardar este video** y actualiza el video actual aproximadamente una vez por segundo. Los atajos se registran solo mientras VLC está en primer plano. Asígnalos en **Configuración > Categorías**; cada número se puede vincular a una categoría. Una cifra sin asignar muestra un aviso y no guarda el video. Si una combinación ya está ocupada, BVS lo indica y mantiene activos los demás atajos. Los atajos de categorías temporales se olvidan al cerrar BVS.
 
 La ventana principal mantiene la vista previa de los videos guardados y el botón para procesar el lote. La selección por cifras finales está disponible como método alternativo desde el selector superior.
 
