@@ -22,11 +22,14 @@ private struct Match: Identifiable {
 
 private final class CategoryStore: ObservableObject {
     static let shared = CategoryStore()
+    static let shortcutDigits = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"]
     private let defaultsKey = "BVS.permanentCategories"
+    private let shortcutDefaultsKey = "BVS.categoryShortcuts"
 
     @Published private(set) var permanentCategories: [String]
     @Published private(set) var temporaryCategories: [String] = []
     @Published var selectedCategory: String?
+    @Published private(set) var shortcutsByCategory: [String: String]
 
     var categories: [String] {
         (permanentCategories + temporaryCategories)
@@ -34,12 +37,40 @@ private final class CategoryStore: ObservableObject {
     }
 
     private init() {
-        permanentCategories = UserDefaults.standard.stringArray(forKey: defaultsKey) ?? []
+        let loadedPermanentCategories = UserDefaults.standard.stringArray(forKey: defaultsKey) ?? []
+        permanentCategories = loadedPermanentCategories
+        let savedShortcuts = UserDefaults.standard.dictionary(forKey: shortcutDefaultsKey) as? [String: String] ?? [:]
+        var validShortcuts: [String: String] = [:]
+        for (category, digit) in savedShortcuts where loadedPermanentCategories.contains(category) && Self.shortcutDigits.contains(digit) {
+            if !validShortcuts.values.contains(digit) { validShortcuts[category] = digit }
+        }
+        shortcutsByCategory = validShortcuts
+        UserDefaults.standard.set(validShortcuts, forKey: shortcutDefaultsKey)
         selectedCategory = nil
     }
 
     func isPermanent(_ category: String) -> Bool {
         permanentCategories.contains(category)
+    }
+
+    func shortcut(for category: String) -> String? {
+        shortcutsByCategory[category]
+    }
+
+    func category(for shortcut: String) -> String? {
+        shortcutsByCategory.first(where: { $0.value == shortcut })?.key
+    }
+
+    func shortcutOwner(of shortcut: String) -> String? {
+        category(for: shortcut)
+    }
+
+    func assignShortcut(_ shortcut: String?, to category: String) {
+        if let shortcut,
+           let owner = self.category(for: shortcut), owner != category { return }
+        shortcutsByCategory.removeValue(forKey: category)
+        if let shortcut { shortcutsByCategory[category] = shortcut }
+        UserDefaults.standard.set(shortcutsByCategory, forKey: shortcutDefaultsKey)
     }
 
     func add(_ category: String, permanent: Bool) {
@@ -56,6 +87,8 @@ private final class CategoryStore: ObservableObject {
         permanentCategories.removeAll { $0 == category }
         temporaryCategories.removeAll { $0 == category }
         if selectedCategory == category { selectedCategory = nil }
+        shortcutsByCategory.removeValue(forKey: category)
+        UserDefaults.standard.set(shortcutsByCategory, forKey: shortcutDefaultsKey)
         savePermanentCategories()
     }
 
@@ -74,7 +107,7 @@ private struct CategoryManagerView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("Crea categorías antes de revisar los videos. Las temporales solo están disponibles durante esta sesión; las permanentes se conservan para las próximas. Al cerrar BVS se olvidan las temporales, pero los archivos ya procesados permanecen en su carpeta.")
+            Text("Crea categorías y, si quieres, asígnales un atajo numérico. Mientras VLC está al frente, ⌃⌥⌘1–0 guarda directamente en la categoría asignada. ⌃⌥⌘S guarda sin categoría. Las categorías temporales y sus atajos se olvidan al cerrar BVS.")
                 .font(.subheadline).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
 
             HStack(spacing: 10) {
@@ -103,6 +136,22 @@ private struct CategoryManagerView: View {
                         Text(category)
                         Text(store.isPermanent(category) ? "Permanente" : "Temporal")
                             .font(.caption).foregroundStyle(.secondary)
+                        Picker("Atajo", selection: Binding(
+                            get: { store.shortcut(for: category) },
+                            set: { store.assignShortcut($0, to: category) }
+                        )) {
+                            Text("Sin atajo").tag(Optional<String>.none)
+                            ForEach(CategoryStore.shortcutDigits, id: \.self) { digit in
+                                let owner = store.shortcutOwner(of: digit)
+                                Text(owner != nil && owner != category ? "⌃⌥⌘\(digit) · en uso" : "⌃⌥⌘\(digit)")
+                                    .tag(Optional(digit))
+                                    .disabled(owner != nil && owner != category)
+                            }
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.menu)
+                        .frame(width: 105)
+                        .help("Asignar atajo a esta categoría")
                         Spacer()
                         Button {
                             store.remove(category)
@@ -124,7 +173,7 @@ private struct CategoryManagerView: View {
             }
         }
         .padding(22)
-        .frame(width: 560)
+        .frame(width: 620)
     }
 
     private func createCategory() {
@@ -303,8 +352,8 @@ private func bvsHotKeyHandler(
         nil,
         &pressedHotKey
     )
-    guard status == noErr, pressedHotKey.id == 1 else { return OSStatus(eventNotHandledErr) }
-    Unmanaged<VLCShortcutController>.fromOpaque(userData).takeUnretainedValue().shortcutPressed()
+    guard status == noErr else { return OSStatus(eventNotHandledErr) }
+    Unmanaged<VLCShortcutController>.fromOpaque(userData).takeUnretainedValue().shortcutPressed(hotKeyID: pressedHotKey.id)
     return noErr
 }
 
@@ -314,11 +363,12 @@ private final class VLCShortcutController: ObservableObject {
     @Published private(set) var registrationError: String?
     @Published private(set) var isRegisteredForVLC = false
     @Published private(set) var lastAddedURL: URL?
+    @Published private(set) var shortcutFeedback: String?
     private var eventHandler: EventHandlerRef?
-    private var hotKey: EventHotKeyRef?
+    private var hotKeys: [UInt32: EventHotKeyRef] = [:]
     private var activationObserver: NSObjectProtocol?
     private var frontmostTimer: Timer?
-    private var onSelect: ((URL) -> Void)?
+    private var onSelect: ((URL, String?) -> Void)?
     private var onFailure: ((String) -> Void)?
     private var isQuerying = false
 
@@ -332,7 +382,7 @@ private final class VLCShortcutController: ObservableObject {
         }
     }
 
-    func start(onSelect: @escaping (URL) -> Void, onFailure: @escaping (String) -> Void) {
+    func start(onSelect: @escaping (URL, String?) -> Void, onFailure: @escaping (String) -> Void) {
         self.onSelect = onSelect
         self.onFailure = onFailure
         guard activationObserver == nil else {
@@ -371,46 +421,75 @@ private final class VLCShortcutController: ObservableObject {
     }
 
     private func updateRegistration(isVLCActive: Bool) {
-        if isVLCActive, hotKey == nil, eventHandler != nil, registrationError == nil {
-            let hotKeyID = EventHotKeyID(signature: OSType(0x42565331), id: 1)
-            let modifiers = UInt32(controlKey | optionKey | cmdKey)
-            let status = RegisterEventHotKey(
-                UInt32(kVK_ANSI_S),
-                modifiers,
-                hotKeyID,
-                GetApplicationEventTarget(),
-                0,
-                &hotKey
-            )
-            if status == noErr {
-                registrationError = nil
-                isRegisteredForVLC = true
-            } else {
-                hotKey = nil
-                isRegisteredForVLC = false
-                registrationError = "No se pudo registrar ⌃⌥⌘S (\(status))."
+        if isVLCActive, hotKeys.isEmpty, eventHandler != nil {
+            var registrations: [(String, UInt32, UInt32)] = [("S", UInt32(kVK_ANSI_S), 100)]
+            let digitKeys: [(String, Int)] = [
+                ("1", kVK_ANSI_1), ("2", kVK_ANSI_2), ("3", kVK_ANSI_3),
+                ("4", kVK_ANSI_4), ("5", kVK_ANSI_5), ("6", kVK_ANSI_6),
+                ("7", kVK_ANSI_7), ("8", kVK_ANSI_8), ("9", kVK_ANSI_9), ("0", kVK_ANSI_0)
+            ]
+            registrations.append(contentsOf: digitKeys.enumerated().map { index, key in
+                (key.0, UInt32(key.1), UInt32(index + 1))
+            })
+            var unavailable: [String] = []
+            for (key, keyCode, identifier) in registrations {
+                var reference: EventHotKeyRef?
+                let hotKeyID = EventHotKeyID(signature: OSType(0x42565331), id: identifier)
+                let status = RegisterEventHotKey(
+                    keyCode,
+                    UInt32(controlKey | optionKey | cmdKey),
+                    hotKeyID,
+                    GetApplicationEventTarget(),
+                    0,
+                    &reference
+                )
+                if status == noErr, let reference {
+                    hotKeys[identifier] = reference
+                } else {
+                    unavailable.append("⌃⌥⌘\(key)")
+                }
             }
-        } else if !isVLCActive, let hotKey {
-            UnregisterEventHotKey(hotKey)
-            self.hotKey = nil
+            registrationError = unavailable.isEmpty
+                ? nil
+                : "Atajos ocupados por otra app: \(unavailable.joined(separator: ", "))."
+            isRegisteredForVLC = hotKeys[100] != nil
+        } else if !isVLCActive, !hotKeys.isEmpty {
+            for hotKey in hotKeys.values { UnregisterEventHotKey(hotKey) }
+            hotKeys.removeAll()
             isRegisteredForVLC = false
-        } else if !isVLCActive, eventHandler != nil {
             registrationError = nil
         }
     }
 
-    func shortcutPressed() {
+    func shortcutPressed(hotKeyID: UInt32) {
         DispatchQueue.main.async { [weak self] in
             guard let self,
                   !self.isQuerying else { return }
+            let category: String?
+            if hotKeyID == 100 {
+                category = nil
+            } else {
+                let digits = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"]
+                guard hotKeyID >= 1, hotKeyID <= UInt32(digits.count) else { return }
+                let digit = digits[Int(hotKeyID - 1)]
+                guard let assignedCategory = CategoryStore.shared.category(for: digit) else {
+                    let message = "No hay categoría asignada a ⌃⌥⌘\(digit). Asígnala en Configuración → Categorías."
+                    self.shortcutFeedback = message
+                    self.onFailure?(message)
+                    return
+                }
+                category = assignedCategory
+            }
             self.isQuerying = true
             DispatchQueue.global(qos: .userInitiated).async {
                 let (url, errorMessage) = Self.currentVLCFile()
                 DispatchQueue.main.async {
                     self.isQuerying = false
                     if let url {
-                        self.onSelect?(url)
+                        self.shortcutFeedback = nil
+                        self.onSelect?(url, category)
                     } else if let errorMessage {
+                        self.shortcutFeedback = errorMessage
                         self.onFailure?(errorMessage)
                     }
                 }
@@ -445,7 +524,7 @@ private struct VLCCompanionView: View {
     @StateObject private var monitor = VLCNowPlayingMonitor()
     @ObservedObject private var shortcutController = VLCShortcutController.shared
     @ObservedObject private var categoryStore = CategoryStore.shared
-    let onAdd: (URL) -> Void
+    let onAdd: (URL, String?) -> Void
 
     private var currentVideoWasAdded: Bool {
         guard let currentURL = monitor.currentURL,
@@ -482,7 +561,7 @@ private struct VLCCompanionView: View {
                     Text(url.deletingLastPathComponent().path).font(.caption2).foregroundStyle(.tertiary).lineLimit(2)
                 }
                 Button {
-                    onAdd(url)
+                    onAdd(url, categoryStore.selectedCategory)
                 } label: {
                     Label(currentVideoWasAdded ? "Añadido a la selección" : "Guardar este video", systemImage: currentVideoWasAdded ? "checkmark.circle.fill" : "plus.circle.fill")
                         .frame(maxWidth: .infinity)
@@ -494,7 +573,7 @@ private struct VLCCompanionView: View {
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
             Spacer(minLength: 0)
-            Text(shortcutController.registrationError ?? (shortcutController.isRegisteredForVLC ? "Atajo ⌃⌥⌘S listo. La categoría elegida se aplica a los próximos videos." : "Atajo ⌃⌥⌘S activo solo mientras VLC está al frente."))
+            Text(shortcutController.shortcutFeedback ?? shortcutController.registrationError ?? (shortcutController.isRegisteredForVLC ? "⌃⌥⌘S guarda sin categoría. ⌃⌥⌘1–0 guarda en la categoría asignada." : "Atajos activos solo mientras VLC está al frente."))
                 .font(.caption2).foregroundStyle(.tertiary).fixedSize(horizontal: false, vertical: true)
         }
         .padding(18)
@@ -670,7 +749,7 @@ struct ContentView: View {
                 Text("Basic Video Selector").font(.subheadline).foregroundStyle(.secondary)
             }
             Spacer()
-            Text(shortcutController.registrationError != nil ? "Atajo no disponible" : (shortcutController.isRegisteredForVLC ? "Atajo listo" : "⌃⌥⌘S"))
+            Text(shortcutController.registrationError != nil ? "Atajos con conflictos" : (shortcutController.isRegisteredForVLC ? "Atajos listos" : "⌃⌥⌘S"))
                 .font(.caption.monospaced().weight(.semibold))
                 .padding(.horizontal, 8).padding(.vertical, 5)
                 .background(Color(nsColor: .controlBackgroundColor), in: Capsule())
@@ -990,7 +1069,7 @@ struct ContentView: View {
         NSApp.activate(ignoringOtherApps: true)
     }
 
-    private func addVLCVideo(_ url: URL) {
+    private func addVLCVideo(_ url: URL, category: String?) {
         guard !matches.contains(where: { $0.url.standardizedFileURL == url.standardizedFileURL }) else {
             shortcutController.markAdded(url)
             message = "Este video ya está en la selección."
@@ -999,7 +1078,7 @@ struct ContentView: View {
         if folderURL == nil {
             folderURL = url.deletingLastPathComponent()
         }
-        matches.append(Match(url: url, category: categoryStore.selectedCategory))
+        matches.append(Match(url: url, category: category))
         matches.sort { $0.url.lastPathComponent.localizedStandardCompare($1.url.lastPathComponent) == .orderedAscending }
         shortcutController.markAdded(url)
         message = "Añadido desde VLC. Total en la selección: \(matches.count)."
